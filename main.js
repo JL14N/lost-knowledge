@@ -8,12 +8,28 @@ import * as THREE from 'https://unpkg.com/three@0.164.1/build/three.module.js';
 import { GLTFLoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loaders/GLTFLoader.js';
 import { RGBELoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loaders/RGBELoader.js';
 import { PointerLockControls } from 'https://unpkg.com/three@0.164.1/examples/jsm/controls/PointerLockControls.js';
+import * as SlidePuzzle from './painting.js';
 
 // --- Scene Setup ---
 let scene, camera, renderer, controls;
+let slidePuzzleInited = false;
 let stairsRef = null;          // base stairs segment
 let towerRef = null;           // tower root
+let towerTopRef = null;        // optional top model for final level
 let stairsGroup = null;        // group containing all stair segments for whole-stack transforms
+// Dev/start flag: if ?start=philosophy present, load only tower-top and restrict camera
+const params = (typeof window !== 'undefined' && window.location) ? new URLSearchParams(window.location.search) : new URLSearchParams('');
+const DEV_START_PHILOSOPHY = params.get('start') === 'philosophy';
+let topAreaCenter = new THREE.Vector2();
+let topAreaRadius = 2.5;
+let topAreaY = 0;
+// Dev-level visual resources (philosophy preview)
+let devComposer = null;
+let devLayers = [];
+let devStars = null;
+let devClock = null;
+let devBloomPass = null;
+let devFilmPass = null;
 // Visibility limiter planes (follow camera)
 let topLimiter = null;
 let bottomLimiter = null;
@@ -61,7 +77,8 @@ function initScene() {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
   // tone mapping/exposure to reduce overall lightness
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.00; // increased so scene is brighter by default
+  // Slightly increase exposure to brighten interior details
+  renderer.toneMappingExposure = 0.95;
   // reduce shadow and PBR cost
   renderer.shadowMap.enabled = false;
   renderer.physicallyCorrectLights = false;
@@ -70,7 +87,11 @@ function initScene() {
 
 function initControls() {
   controls = new PointerLockControls(camera, renderer.domElement);
-  renderer.domElement.addEventListener('click', () => controls.lock());
+  renderer.domElement.addEventListener('click', () => {
+    // Do not allow pointer lock while the slide puzzle is active
+    try { if (scene && scene.userData && scene.userData.puzzleState === 'active') return; } catch(e) {}
+    controls.lock();
+  });
   controls.addEventListener('lock',   () => console.log('Pointer locked'));
   controls.addEventListener('unlock', () => console.log('Pointer unlocked'));
   // Attach camera-following fill light if it was created in initLighting()
@@ -80,22 +101,25 @@ function initControls() {
 }
 
 function initLighting() {
-  // Slightly stronger hemisphere and directional fill for general lighting
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x666666, 0.35);
+  // Stronger hemisphere and directional fill for better interior illumination
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x666666, 0.50);
   hemi.position.set(0, 1, 0);
   scene.add(hemi);
 
-  const dir = new THREE.DirectionalLight(0xffffff, 0.2);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.35);
   dir.position.set(3, 5, 2);
   scene.add(dir);
 
-  // Ambient fill
-  const ambient = new THREE.AmbientLight(0xffffff, 0.8);
+  // Ambient fill (increased) to lift dark interiors
+  const ambient = new THREE.AmbientLight(0xffffff, 1.0);
   scene.add(ambient);
-
+  // mark models as loaded so constraints and wrap logic can safely run
+  scene.userData.modelsLoaded = true;
+  // initialize puzzle state machine: 'unloaded' | 'loaded' | 'active' | 'finished'
+  scene.userData.puzzleState = scene.userData.puzzleState || 'unloaded';
   // Camera-following point light (headlamp) to brighten immediate surroundings
   const cameraLightGroup = new THREE.Group();
-  const camFill = new THREE.PointLight(0xffffff, 1.4, 55, 2);
+  const camFill = new THREE.PointLight(0xffffff, 2.0, 55, 2);
   camFill.position.set(0, 0, 0);
   cameraLightGroup.add(camFill);
   // Keep a reference so it can be attached when camera is created
@@ -184,20 +208,29 @@ function createInteractionUI() {
   link.href = 'https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&display=swap';
   document.head.appendChild(link);
 
-  const style = document.createElement('style');
-  style.textContent = `
-    #lk_interact { position: fixed; left: 50%; transform: translateX(-50%); bottom: 6vh; pointer-events: none; z-index: 10000; font-family: 'Cinzel', serif; display: flex; align-items:center; gap:0.6rem; }
-    #lk_interact .panel { background: rgba(0,0,0,0.55); color: #fff; padding: 0.6rem 1rem; border-radius: 8px; font-size: calc(12px + 0.4vh); display:inline-flex; align-items:center; gap:0.4rem; }
-  #lk_interact img { height: calc(22px + 0.8vh); width: auto; display:inline-block; vertical-align:middle; }
-    #lk_interact.hidden { display:none; }
+    const style = document.createElement('style');
+    style.textContent = `
+    /* Dialog wrapper centered at bottom */
+    #lk_puzzle_wrap { position: fixed; left: 50%; transform: translateX(-50%); bottom: 6vh; pointer-events: none; z-index: 10000; display: flex; gap: 1rem; justify-content: center; align-items: center; }
+    /* Generic dialog box (standardized) */
+  .lk_dialog { pointer-events: none; display: inline-flex; align-items: center; gap: 0.8rem; background: rgba(0,0,0,0.55); color: #fff; padding: 12px 16px; border-radius: 10px; font-family: 'Cinzel', serif; min-height: 64px; max-width: 36rem; box-sizing: border-box; }
+    /* Icon: fixed smaller size (approx -30%) to prioritize text; width auto */
+    .lk_dialog_icon { height: 44px; width: auto; display: block; object-fit: contain; }
+    /* tiny modifier for very small icons (arrow keys) */
+    .lk_icon_tiny { height: 32px !important; }
+    /* Text block keeps lines short and left aligned; vertical centering ensured by flex */
+    .lk_dialog_text { display:flex; flex-direction:column; text-align:left; justify-content:center; line-height:1.02; }
+    .lk_dialog_line1 { font-size: 22px; font-weight:600; }
+    .lk_dialog_line2 { font-size: 18px; opacity:0.95; }
+  /* F bubble positioning: center-bottom like other dialogs but higher z-index when needed */
+  #lk_interact { position: fixed; left: 50%; transform: translateX(-50%); bottom: 6vh; z-index: 100001; }
+  #lk_interact .lk_dialog { min-height: 64px; padding: 10px 12px; }
+  /* allow only F and specific control dialogs to be interactive */
+  #lk_interact .lk_dialog, #lk_interact_topright .lk_dialog, #lk_dialog_r, #lk_dialog_i, #lk_dialog_h { pointer-events: auto; }
   `;
   document.head.appendChild(style);
 
-  const el = document.createElement('div');
-  el.id = 'lk_interact';
-  el.className = 'hidden';
-  el.innerHTML = '<div class="panel"><div id="lk_interact_text">Presiona <img id="lk_interact_key" src="./assets/vectors/Fkey.svg" alt="F" style="height:1.5em; vertical-align:middle; margin:0 0.35rem; display:inline-block;"/> para recuperar el conocimiento</div></div>';
-  document.body.appendChild(el);
+  // No initial bubble element is created; the small F-bubble is created dynamically when the puzzle is loaded and the player looks at the panel.
 }
 
 function updateInteraction() {
@@ -212,28 +245,34 @@ function updateInteraction() {
   camera.getWorldDirection(forward);
   const dot = forward.dot(toPlane.normalize());
   const qualifies = dist <= INTERACT_MAX_DIST && dot >= INTERACT_DOT_THRESHOLD;
-  const ui = document.getElementById('lk_interact');
-  if (qualifies) {
-    if (ui) ui.classList.remove('hidden');
-    interactivePlane.material.color.set(0xff6666);
-    interactivePlaneVisible = true;
-  } else {
-    if (ui) ui.classList.add('hidden');
-    interactivePlane.material.color.set(0xff3333);
-    interactivePlaneVisible = false;
-  }
+  interactivePlaneVisible = qualifies;
+  interactivePlane.material.color.set(qualifies ? 0xff6666 : 0xff3333);
+  try { if (SlidePuzzle && typeof SlidePuzzle.updateInteractBubble === 'function') SlidePuzzle.updateInteractBubble(qualifies); } catch(e) { console.warn('interaction UI update failed', e); }
 }
 
 // Key handler for interaction
+// Key handler for interaction: F toggles pointer lock (switch between movement and 'game' mode)
 window.addEventListener('keydown', (e)=>{
-  if (e.code === 'KeyF' && interactivePlaneVisible) {
-    // simple feedback action: flash text and log
-    const t = document.getElementById('lk_interact_text');
-    if (t) {
-      t.textContent = 'Conocimiento recuperado';
-      setTimeout(()=>{ if (t) t.textContent = 'Presiona F para recuperar el conocimiento'; }, 2000);
-    }
-    console.log('Interact: recovered knowledge');
+  if (e.code === 'KeyF') {
+    // If puzzle is finished, F should do nothing
+    if (scene && scene.userData && scene.userData.puzzleState === 'finished') return;
+    // If puzzle is active, pressing F exits puzzle solving mode regardless of look direction
+    try {
+      if (scene && scene.userData && scene.userData.puzzleState === 'active') {
+        try { if (SlidePuzzle && SlidePuzzle.hide) SlidePuzzle.hide(); } catch(e) {}
+        return;
+      }
+    } catch(err) { console.warn('F-key puzzle hide failed', err); }
+    // Only allow entering puzzle when player is looking at panel and the bubble is visible
+    if (!interactivePlaneVisible) return;
+    const bubble = document.getElementById('lk_interact');
+    if (!bubble || bubble.style.display === 'none') return;
+    try {
+      if (scene && scene.userData && scene.userData.puzzleState === 'loaded') {
+        try { if (SlidePuzzle && SlidePuzzle.show) SlidePuzzle.show(); } catch(e) {}
+        return;
+      }
+    } catch(err) { console.warn('F-key puzzle show failed', err); }
   }
 });
 
@@ -350,7 +389,8 @@ const _v_move = new THREE.Vector3();
 const _v_up = new THREE.Vector3(0,1,0);
 
 function updateMovement(dt) {
-  if (!controls.isLocked) return;
+  const controlsEnabled = (scene.userData && scene.userData.controlsEnabled) || controls.isLocked;
+  if (!controlsEnabled) return;
   // If models haven't finished loading, don't allow movement to run (prevents accidental teleports before anchoring)
   if (!scene.userData || !scene.userData.modelsLoaded) return;
   const speed = (keys.ShiftLeft || keys.ShiftRight) ? WALK_SPEED * RUN_MULT : WALK_SPEED;
@@ -412,7 +452,25 @@ function updateMovement(dt) {
   }
 
   // apply helical / cylindrical constraint after movement
-  constrainCameraToHelix();
+  if (DEV_START_PHILOSOPHY && towerTopRef) constrainCameraToTopArea(); else constrainCameraToHelix();
+}
+
+// Constrain camera to a circular area on top of the tower (used for dev preview of final level)
+function constrainCameraToTopArea() {
+  if (!camera || !towerTopRef) return;
+  // compute vector from center to camera
+  const dx = camera.position.x - topAreaCenter.x;
+  const dz = camera.position.z - topAreaCenter.y;
+  const r = Math.hypot(dx, dz);
+  if (r > topAreaRadius) {
+    const k = topAreaRadius / r;
+    camera.position.x = topAreaCenter.x + dx * k;
+    camera.position.z = topAreaCenter.y + dz * k;
+  }
+  // clamp Y to be near the top area Y within a small window
+  camera.position.y = Math.max(topAreaY - 0.2, Math.min(topAreaY + 0.8, camera.position.y));
+  // sync controls internal object if present
+  try { if (controls && controls.getObject) controls.getObject().position.copy(camera.position); } catch(e) {}
 }
 
 function constrainCameraToHelix() {
@@ -449,6 +507,17 @@ function constrainCameraToHelix() {
   const wrapAmount = 3 * helix.pitch;
         if (camera.position.y >= upThreshold) {
           camera.position.y -= wrapAmount;
+          // If the player wrapped upward (teleported back down), initialize the puzzle behind the interactive plane
+          try {
+            if (SlidePuzzle && SlidePuzzle.init && interactivePlane && !slidePuzzleInited) {
+              const anchorPos = interactivePlane.getWorldPosition(new THREE.Vector3());
+              const anchorQuat = interactivePlane.getWorldQuaternion(new THREE.Quaternion());
+              // initialize puzzle on first wrap but DO NOT auto-show it; user must press F to start
+              SlidePuzzle.init(scene, camera, controls, anchorPos, anchorQuat)
+                .then(()=>{ slidePuzzleInited = true; })
+                .catch((err)=>{ console.warn('SlidePuzzle.init failed', err); });
+            }
+          } catch(e) { /* ignore */ }
         } else if (camera.position.y <= downThreshold) {
           camera.position.y += wrapAmount;
         }
@@ -558,10 +627,18 @@ function computeHelixLastThetaFromPosition(worldPos) {
 
 async function placeTowerAndStairs() {
   try {
-    const [tower, stairs] = await Promise.all([
+    const loaders = [
       loadGLTF('./assets/models/TowerSection.glb'),
-      loadGLTF('./assets/models/SpiralStairs.glb'),
-    ]);
+      loadGLTF('./assets/models/SpiralStairs.glb')
+    ];
+    if (DEV_START_PHILOSOPHY) {
+      // attempt to also load TowerTop for the final-level area
+      loaders.push(loadGLTF('./assets/models/TowerTop.glb').catch((e)=>{ console.warn('TowerTop missing', e); return null; }));
+    }
+    const results = await Promise.all(loaders);
+    const tower = results[0];
+    const stairs = results[1];
+    const towerTop = DEV_START_PHILOSOPHY ? results[2] : null;
 
   const { size: towerSize }  = centerAndFloor(tower);
   // We no longer auto-center & scale stairs; keep its authored proportions.
@@ -570,6 +647,32 @@ async function placeTowerAndStairs() {
   tower.position.set(0, 0, 0);
   scene.add(tower);
   towerRef = tower;
+
+  // If dev-start and TowerTop loaded, place it on top of the tower and use its top area for camera constraints
+  if (DEV_START_PHILOSOPHY && towerTop) {
+    const { size: topSize } = centerAndFloor(towerTop);
+    towerTop.position.set(0, 0, 0);
+    // position TowerTop so its base sits at tower top approximate Y
+    const tbox = new THREE.Box3().setFromObject(towerRef);
+    const topY = tbox.max.y + 0.01;
+    towerTop.position.y = topY;
+    scene.add(towerTop);
+    towerTopRef = towerTop;
+    // set top area center and Y for camera constraint
+    const box = new THREE.Box3().setFromObject(towerTopRef);
+    const center = box.getCenter(new THREE.Vector3());
+    topAreaCenter.set(center.x, center.z);
+    topAreaY = box.max.y + 0.1;
+    topAreaRadius = Math.max(1.5, Math.min(3.5, Math.max(box.getSize(new THREE.Vector3()).x, box.getSize(new THREE.Vector3()).z) * 0.6));
+    // For dev preview, set helix.disabled so helix constraints don't fight the top-area clamp
+    helix.enabled = false;
+    // set up philosophy visuals (sky layers, particles, postprocessing)
+    try { setupPhilosophyVisuals(); } catch(e) { console.warn('Philosophy visuals failed', e); }
+        // Remove other large world sprites (tower and stairs) so only the top model and dev visuals remain
+        try { if (towerRef && towerRef.parent) { towerRef.parent.remove(towerRef); } } catch(e) {}
+        try { if (stairsGroup && stairsGroup.parent) { stairsGroup.parent.remove(stairsGroup); } } catch(e) {}
+        try { if (stairsRef && stairsRef.parent) { stairsRef.parent.remove(stairsRef); } } catch(e) {}
+  }
 
   // Create group to hold stairs
   stairsGroup = new THREE.Group();
@@ -602,7 +705,8 @@ async function placeTowerAndStairs() {
       const lights = 3;
       for (let i=0;i<lights;i++) {
         const y = tmin + (i / (lights - 1 || 1)) * (tmax - tmin);
-        const pl = new THREE.PointLight(0xfff6e0, 0.45, 20, 2);
+        // stronger interior points for better visibility
+        const pl = new THREE.PointLight(0xfff6e0, 0.9, 28, 2);
         pl.position.set(center.x, y, center.z);
         scene.add(pl);
       }
@@ -657,18 +761,26 @@ async function placeTowerAndStairs() {
       // small nudge toward the tower center so it visually sits in the window seam
       const towardCenter = new THREE.Vector3(helix.center.x, target.y, helix.center.y).sub(target).multiplyScalar(0.08);
       target.add(towardCenter);
-      interactivePlane.position.copy(target);
-      // orient plane to face the initial camera position
-      interactivePlane.lookAt(init.cameraPos);
-      interactivePlane.visible = true;
+  interactivePlane.position.copy(target);
+  // orient plane to face the initial camera position
+  interactivePlane.lookAt(init.cameraPos);
+  // DO NOT make the interactive plane visible yet. It should only appear when
+  // the puzzle module has finished preparing textures so the panel doesn't show
+  // empty/placeholder content. painting.init will set scene.userData.puzzleLoaded
+  // and updateInteraction() will flip visibility when that flag appears.
       // scale plane based on initial distance so it appears consistent
       const d = init.cameraPos.distanceTo(interactivePlane.position);
       const scale = Math.max(0.5, Math.min(1.6, d * 0.35));
       interactivePlane.scale.set(scale, scale * 0.6, 1);
+  // store the panel pose for the puzzle module to teleport the camera to
+  try { scene.userData.initialPanelPose = { pos: interactivePlane.getWorldPosition(new THREE.Vector3()), quat: interactivePlane.getWorldQuaternion(new THREE.Quaternion()) }; } catch(e) {}
+  // provide a camera reference for the puzzle module
+  try { scene.userData.camera = camera; } catch(e) {}
     }
   } catch (e) {
     console.warn('Interactive plane setup failed', e);
   }
+  // Do not initialize the slide puzzle now; initialize on upward wrap or when the player explicitly activates it.
   // Now that models are loaded and initial references are stored, allow wrap to occur after a brief delay
   setTimeout(() => {
     scene.userData.wrapReady = true;
@@ -694,7 +806,20 @@ function animate() {
     updateLimiterPlanes();
   // update interactive UI state
   try { updateInteraction(); } catch (e) { /* ignore */ }
-    renderer.render(scene, camera);
+  // update slide puzzle if active
+  try { if (SlidePuzzle && SlidePuzzle.update) SlidePuzzle.update(dt); } catch(e) {}
+    // If we're running the philosophy dev preview, update its layers/particles and render via composer
+    try {
+      if (DEV_START_PHILOSOPHY && devComposer) {
+        const t = devClock ? devClock.getElapsedTime() : 0;
+        if (devLayers && devLayers.length) devLayers.forEach((l)=>{ l.rotation.y += l.userData.speed; l.rotation.z = Math.sin(t * 0.05 + l.userData.offset) * 0.05; });
+        if (devStars) { devStars.rotation.y += 0.0002; }
+        try { if (devBloomPass) devBloomPass.strength = 1.1 + Math.sin(t * 0.5) * 0.2; } catch(e) {}
+        try { devComposer.render(); } catch(e) { renderer.render(scene, camera); }
+      } else {
+        renderer.render(scene, camera);
+      }
+    } catch(e) { renderer.render(scene, camera); }
     // update stats overlay if present
     try {
       if (window._statsOverlay && window._statsOverlay.update) window._statsOverlay.update(dt);
@@ -707,7 +832,7 @@ function animate() {
 
 // --- Main Entry ---
 
-function main() {
+async function main() {
   initScene();
   initControls();
   initLighting();
@@ -726,7 +851,8 @@ function main() {
       // rotate by creating a texture and setting center/rotation
       data.center.set(0.5, 0.5);
       data.rotation = Math.PI; // 180 degrees
-      const env = pmrem.fromEquirectangular(data).texture;
+    const env = pmrem.fromEquirectangular(data).texture;
+    try { if (env && env.center) env.center.set(0.5, 0.5); if (env) env.rotation = Math.PI; } catch(e) {}
   // use HDR as background only to avoid the cost of a full environment for PBR
   scene.background = env;
       data.dispose();
@@ -739,45 +865,7 @@ function main() {
   _tryLoadHDRSky().catch(()=>{});
   // Removed runtime tweaking and capture handlers - scene runs with embedded calibration only.
 
-  // Create a small, non-obtrusive stats overlay
-  (function createStatsOverlay(){
-    const style = document.createElement('style');
-    style.textContent = `
-      #lk_stats { position: fixed; right: 8px; top: 8px; background: rgba(0,0,0,0.55); color: #e8e8e8; padding: 8px 10px; font-family: monospace; font-size:12px; line-height:1.3; border-radius:6px; z-index:9999; pointer-events:none; }
-      #lk_stats.hidden { display:none; }
-      #lk_stats .label { color:#9ab; }
-    `;
-    document.head.appendChild(style);
-    const el = document.createElement('div');
-    el.id = 'lk_stats';
-    el.innerHTML = '<div><span class="label">FPS:</span> <span id="lk_fps">...</span></div>'+
-                   '<div><span class="label">Y:</span> <span id="lk_cam_y">...</span></div>'+
-                   '<div><span class="label">radius:</span> <span id="lk_radius">...</span></div>'+
-                   '<div><span class="label">pitch:</span> <span id="lk_pitch">...</span></div>';
-    document.body.appendChild(el);
-    // simple smoothed FPS counter
-    let acc = 0; let frames = 0; let fps = 0;
-    function update(dt){
-      frames++;
-      acc += (dt || 0);
-      if (acc >= 0.5) { // update every 0.5s
-        fps = Math.round(frames / acc);
-        frames = 0; acc = 0;
-        const elF = document.getElementById('lk_fps');
-        const elY = document.getElementById('lk_cam_y');
-        const elR = document.getElementById('lk_radius');
-        const elP = document.getElementById('lk_pitch');
-        if (elF) elF.textContent = fps;
-        if (elY) elY.textContent = camera ? camera.position.y.toFixed(2) : 'n/a';
-        if (elR) elR.textContent = helix.radius.toFixed(3);
-        if (elP) elP.textContent = helix.pitch.toFixed(3);
-      }
-    }
-    // attach to window so animate() can call it without imports
-    window._statsOverlay = { update };
-    // Toggle visibility with Tab (non-obstructive): allow showing/hiding for screenshots
-    window.addEventListener('keydown', (e)=>{ if (e.code === 'Tab') { e.preventDefault(); el.classList.toggle('hidden'); } });
-  })();
+  // Removed in-page FPS/stats overlay per project standardization.
 
   animate();
   placeTowerAndStairs();
