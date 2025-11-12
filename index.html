@@ -21,6 +21,28 @@
   }
   </script>
 
-  <script type="module" src="./main.js"></script>
+  <script type="module">
+  // If a ?start=<level> query param is present, dynamically import that level module
+  const params = new URLSearchParams(location.search);
+  const start = params.get('start');
+  if (start) {
+    // sanitize simple level name (no directory traversal)
+    const name = start.replace(/[^a-zA-Z0-9_\-]/g, '');
+    try {
+      // attempt to import `<name>.js` from repo root
+      const mod = await import(`./${name}.js`);
+      // prefer exported init() if present
+      if (mod && typeof mod.init === 'function') {
+        try { mod.init(); } catch(e) { console.warn('level init failed', e); }
+      }
+    } catch (e) {
+      console.error('Failed to load level', name, e);
+      // fallback to main scene
+      import('./main.js');
+    }
+  } else {
+    import('./main.js');
+  }
+  </script>
 </body>
 </html>

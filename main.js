@@ -8,28 +8,55 @@ import * as THREE from 'https://unpkg.com/three@0.164.1/build/three.module.js';
 import { GLTFLoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loaders/GLTFLoader.js';
 import { RGBELoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loaders/RGBELoader.js';
 import { PointerLockControls } from 'https://unpkg.com/three@0.164.1/examples/jsm/controls/PointerLockControls.js';
-import * as SlidePuzzle from './painting.js';
+import * as SlidePuzzle from './slide_puzzle.js';
+import { NarratorManager } from './narrator_manager.js';
 
 // --- Scene Setup ---
+// Intro overlay: show title and start prompt, fade on first interaction
+function createIntroOverlay() {
+  try {
+    // inject Cinzel font
+    const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = 'https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&display=swap'; document.head.appendChild(link);
+    const wrap = document.createElement('div'); wrap.id = 'lk_intro_overlay';
+    wrap.style.position = 'fixed'; wrap.style.left = '0'; wrap.style.top = '0'; wrap.style.width = '100%'; wrap.style.height = '100%'; wrap.style.display = 'flex'; wrap.style.alignItems = 'center'; wrap.style.justifyContent = 'center'; wrap.style.flexDirection = 'column'; wrap.style.background = 'linear-gradient(180deg, rgba(0,0,0,0.0), rgba(0,0,0,0.25))'; wrap.style.zIndex = 9999999; wrap.style.pointerEvents = 'auto';
+
+    const title = document.createElement('div');
+    title.textContent = 'LOST KNOWLEDGE';
+    title.style.fontFamily = 'Cinzel, serif'; title.style.fontWeight = '900'; title.style.fontSize = '72px'; title.style.letterSpacing = '4px'; title.style.color = '#ffffff'; title.style.textShadow = '0 6px 18px rgba(0,0,0,0.6)'; title.style.marginBottom = '18px';
+
+    const prompt = document.createElement('div');
+    prompt.textContent = 'Haz click en cualquier lugar para comenzar';
+    prompt.style.fontFamily = 'Cinzel, serif'; prompt.style.fontWeight = '400'; prompt.style.fontSize = '20px'; prompt.style.color = 'rgba(255,255,255,0.95)'; prompt.style.opacity = '0.95';
+
+    wrap.appendChild(title); wrap.appendChild(prompt);
+    document.body.appendChild(wrap);
+
+    // fade-out on first interaction (click or keydown)
+    function dismiss() {
+      try {
+        window.removeEventListener('click', onFirst); window.removeEventListener('keydown', onFirst);
+      } catch(e) {}
+      const start = performance.now(); const dur = 600;
+      function step(now) {
+        const t = Math.min(1, (now - start) / dur);
+        wrap.style.opacity = String(1 - t);
+        if (t < 1) requestAnimationFrame(step); else { try { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); } catch(e) {} }
+      }
+      requestAnimationFrame(step);
+    }
+    function onFirst(e) { try { dismiss(); } catch(e) {} }
+    window.addEventListener('click', onFirst, { once: true });
+    window.addEventListener('keydown', onFirst, { once: true });
+  } catch(e) { console.warn('createIntroOverlay failed', e); }
+}
+
 let scene, camera, renderer, controls;
 let slidePuzzleInited = false;
+// track how many times the camera has been wrapped down since puzzle-ready
+let _wrapDownCount = 0;
 let stairsRef = null;          // base stairs segment
 let towerRef = null;           // tower root
-let towerTopRef = null;        // optional top model for final level
 let stairsGroup = null;        // group containing all stair segments for whole-stack transforms
-// Dev/start flag: if ?start=philosophy present, load only tower-top and restrict camera
-const params = (typeof window !== 'undefined' && window.location) ? new URLSearchParams(window.location.search) : new URLSearchParams('');
-const DEV_START_PHILOSOPHY = params.get('start') === 'philosophy';
-let topAreaCenter = new THREE.Vector2();
-let topAreaRadius = 2.5;
-let topAreaY = 0;
-// Dev-level visual resources (philosophy preview)
-let devComposer = null;
-let devLayers = [];
-let devStars = null;
-let devClock = null;
-let devBloomPass = null;
-let devFilmPass = null;
 // Visibility limiter planes (follow camera)
 let topLimiter = null;
 let bottomLimiter = null;
@@ -94,6 +121,16 @@ function initControls() {
   });
   controls.addEventListener('lock',   () => console.log('Pointer locked'));
   controls.addEventListener('unlock', () => console.log('Pointer unlocked'));
+  // Play narrator on first pointer lock (once per session)
+  let _narratorPlayedOnLock = false;
+  controls.addEventListener('lock', () => {
+    try {
+      if (!_narratorPlayedOnLock) {
+        try { NarratorManager.play('narrator:on-game-start'); } catch(e) { console.warn('Narrator on-game-start failed', e); }
+        _narratorPlayedOnLock = true;
+      }
+    } catch(e) {}
+  });
   // Attach camera-following fill light if it was created in initLighting()
   if (scene.userData && scene.userData.cameraLightGroup) {
     camera.add(scene.userData.cameraLightGroup);
@@ -452,25 +489,7 @@ function updateMovement(dt) {
   }
 
   // apply helical / cylindrical constraint after movement
-  if (DEV_START_PHILOSOPHY && towerTopRef) constrainCameraToTopArea(); else constrainCameraToHelix();
-}
-
-// Constrain camera to a circular area on top of the tower (used for dev preview of final level)
-function constrainCameraToTopArea() {
-  if (!camera || !towerTopRef) return;
-  // compute vector from center to camera
-  const dx = camera.position.x - topAreaCenter.x;
-  const dz = camera.position.z - topAreaCenter.y;
-  const r = Math.hypot(dx, dz);
-  if (r > topAreaRadius) {
-    const k = topAreaRadius / r;
-    camera.position.x = topAreaCenter.x + dx * k;
-    camera.position.z = topAreaCenter.y + dz * k;
-  }
-  // clamp Y to be near the top area Y within a small window
-  camera.position.y = Math.max(topAreaY - 0.2, Math.min(topAreaY + 0.8, camera.position.y));
-  // sync controls internal object if present
-  try { if (controls && controls.getObject) controls.getObject().position.copy(camera.position); } catch(e) {}
+  constrainCameraToHelix();
 }
 
 function constrainCameraToHelix() {
@@ -500,6 +519,11 @@ function constrainCameraToHelix() {
     // (debug logging removed to reduce console spam)
   if (camera.position.y >= upThreshold || camera.position.y <= downThreshold) {
       const now = Date.now();
+      // debug: log the wrap candidate and thresholds
+      try {
+        console.log('main: wrap candidate', { cameraY: camera.position.y, upThreshold, downThreshold, wrapReadyAt, lastWrap: helix._lastWrapTime, now });
+        try { console.log('main: puzzleState flags', { sceneUserPuzzleSolved: !!(scene && scene.userData && (scene.userData.puzzleSolved || scene.userData.puzzleState === 'finished')), globalPuzzleSolved: !!window._puzzleSolved }); } catch(e) {}
+      } catch(e) {}
       if (now - helix._lastWrapTime < (helix.wrapCooldown || 0)) {
         // skip wrapping if within cooldown window
       } else {
@@ -507,6 +531,18 @@ function constrainCameraToHelix() {
   const wrapAmount = 3 * helix.pitch;
         if (camera.position.y >= upThreshold) {
           camera.position.y -= wrapAmount;
+          // Narrator: increment wrap-down counter and attempt to play the on-level-repeat clips
+          // Only start counting after the painting/puzzle scene has been initialized
+          try {
+            // Only count wrap-down repeats when the puzzle scene is actively loaded
+            if (slidePuzzleInited && !window._wrapCountingPaused) {
+              _wrapDownCount = (_wrapDownCount || 0) + 1;
+              if (_wrapDownCount >= 1 && _wrapDownCount <= 3) {
+                const nk = 'narrator:on-level-repeat-' + _wrapDownCount;
+                try { const started = NarratorManager.play(nk); console.log('NarratorManager.play', nk, started); } catch(e) { console.warn('Narrator play failed', e); }
+              }
+            }
+          } catch(e) { /* ignore narrator failures */ }
           // If the player wrapped upward (teleported back down), initialize the puzzle behind the interactive plane
           try {
             if (SlidePuzzle && SlidePuzzle.init && interactivePlane && !slidePuzzleInited) {
@@ -514,10 +550,23 @@ function constrainCameraToHelix() {
               const anchorQuat = interactivePlane.getWorldQuaternion(new THREE.Quaternion());
               // initialize puzzle on first wrap but DO NOT auto-show it; user must press F to start
               SlidePuzzle.init(scene, camera, controls, anchorPos, anchorQuat)
-                .then(()=>{ slidePuzzleInited = true; })
+                .then(()=>{
+                  slidePuzzleInited = true;
+                  try { _wrapDownCount = 0; } catch(e) {}
+                  try { const started = NarratorManager.play('narrator:on-painting-scene-load'); console.log('NarratorManager.play', 'narrator:on-painting-scene-load', started); } catch(e) { console.warn('Narrator on-painting-scene-load failed', e); }
+                })
                 .catch((err)=>{ console.warn('SlidePuzzle.init failed', err); });
             }
           } catch(e) { /* ignore */ }
+          // If the painting puzzle was solved, trigger the transition to the philosophy scene
+          try {
+            const solved = (scene && scene.userData && (scene.userData.puzzleSolved || scene.userData.puzzleState === 'finished')) || !!window._puzzleSolved;
+            console.log('main: upward wrap occurred; puzzle solved?', solved);
+            if (solved) {
+              // schedule switch asynchronously so we don't block the wrap code
+              try { requestSceneSwitch(); } catch(e) { console.warn('scene switch request failed', e); }
+            }
+          } catch(e) {}
         } else if (camera.position.y <= downThreshold) {
           camera.position.y += wrapAmount;
         }
@@ -625,20 +674,65 @@ function computeHelixLastThetaFromPosition(worldPos) {
   return wrappedTheta + k * (2 * Math.PI);
 }
 
+// Request a scene switch from painting -> philosophy: fade to black, unload, load philosophy.js, fade back in
+async function requestSceneSwitch() {
+  try {
+    if (window._sceneSwitchInProgress) return;
+    window._sceneSwitchInProgress = true;
+    console.log('requestSceneSwitch: starting transition to philosophy');
+    const overlay = document.createElement('div');
+    overlay.style.position = 'fixed'; overlay.style.left = '0'; overlay.style.top = '0'; overlay.style.width = '100%'; overlay.style.height = '100%';
+    overlay.style.background = '#000000'; overlay.style.opacity = '0'; overlay.style.zIndex = 99999999; overlay.style.pointerEvents = 'none';
+    document.body.appendChild(overlay);
+
+    // fade to black over ~5s
+    await new Promise((res) => {
+      const dur = 5000; const start = performance.now();
+      function step(now){ const t = Math.min(1, (now-start)/dur); overlay.style.opacity = String(t); if (t<1) requestAnimationFrame(step); else res(); }
+      requestAnimationFrame(step);
+    });
+
+    // best-effort dispose of scene resources
+    try {
+      if (scene) {
+        scene.traverse((o) => {
+          try { if (o.geometry) o.geometry.dispose(); } catch(e) {}
+          try { if (o.material) { if (Array.isArray(o.material)) o.material.forEach(m=>m.dispose && m.dispose()); else o.material.dispose && o.material.dispose(); } } catch(e) {}
+        });
+      }
+    } catch(e) { console.warn('dispose during switch failed', e); }
+
+    // remove canvas to avoid conflicts (philosophy will create its own renderer)
+    try { const canvas = document.querySelector('#myCanvas'); if (canvas && canvas.parentNode) canvas.parentNode.removeChild(canvas); } catch(e) {}
+
+    // dynamically load philosophy module as a script so it self-initializes
+    await new Promise((res, rej) => {
+      try {
+        const s = document.createElement('script'); s.type = 'module'; s.src = './philosophy.js';
+        s.onload = () => { console.log('philosophy.js loaded'); res(); };
+        s.onerror = (err) => { console.warn('philosophy.js failed to load', err); rej(err); };
+        document.head.appendChild(s);
+      } catch (e) { rej(e); }
+    });
+
+    // brief pause then fade back in quickly
+    await new Promise(r=>setTimeout(r, 300));
+    await new Promise((res) => {
+      const dur = 800; const start = performance.now();
+      function step(now){ const t = Math.min(1, (now-start)/dur); overlay.style.opacity = String(1 - t); if (t<1) requestAnimationFrame(step); else res(); }
+      requestAnimationFrame(step);
+    });
+    try { if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay); } catch(e) {}
+    window._sceneSwitchInProgress = false;
+  } catch (e) { console.warn('requestSceneSwitch error', e); window._sceneSwitchInProgress = false; }
+}
+
 async function placeTowerAndStairs() {
   try {
-    const loaders = [
+    const [tower, stairs] = await Promise.all([
       loadGLTF('./assets/models/TowerSection.glb'),
-      loadGLTF('./assets/models/SpiralStairs.glb')
-    ];
-    if (DEV_START_PHILOSOPHY) {
-      // attempt to also load TowerTop for the final-level area
-      loaders.push(loadGLTF('./assets/models/TowerTop.glb').catch((e)=>{ console.warn('TowerTop missing', e); return null; }));
-    }
-    const results = await Promise.all(loaders);
-    const tower = results[0];
-    const stairs = results[1];
-    const towerTop = DEV_START_PHILOSOPHY ? results[2] : null;
+      loadGLTF('./assets/models/SpiralStairs.glb'),
+    ]);
 
   const { size: towerSize }  = centerAndFloor(tower);
   // We no longer auto-center & scale stairs; keep its authored proportions.
@@ -647,32 +741,6 @@ async function placeTowerAndStairs() {
   tower.position.set(0, 0, 0);
   scene.add(tower);
   towerRef = tower;
-
-  // If dev-start and TowerTop loaded, place it on top of the tower and use its top area for camera constraints
-  if (DEV_START_PHILOSOPHY && towerTop) {
-    const { size: topSize } = centerAndFloor(towerTop);
-    towerTop.position.set(0, 0, 0);
-    // position TowerTop so its base sits at tower top approximate Y
-    const tbox = new THREE.Box3().setFromObject(towerRef);
-    const topY = tbox.max.y + 0.01;
-    towerTop.position.y = topY;
-    scene.add(towerTop);
-    towerTopRef = towerTop;
-    // set top area center and Y for camera constraint
-    const box = new THREE.Box3().setFromObject(towerTopRef);
-    const center = box.getCenter(new THREE.Vector3());
-    topAreaCenter.set(center.x, center.z);
-    topAreaY = box.max.y + 0.1;
-    topAreaRadius = Math.max(1.5, Math.min(3.5, Math.max(box.getSize(new THREE.Vector3()).x, box.getSize(new THREE.Vector3()).z) * 0.6));
-    // For dev preview, set helix.disabled so helix constraints don't fight the top-area clamp
-    helix.enabled = false;
-    // set up philosophy visuals (sky layers, particles, postprocessing)
-    try { setupPhilosophyVisuals(); } catch(e) { console.warn('Philosophy visuals failed', e); }
-        // Remove other large world sprites (tower and stairs) so only the top model and dev visuals remain
-        try { if (towerRef && towerRef.parent) { towerRef.parent.remove(towerRef); } } catch(e) {}
-        try { if (stairsGroup && stairsGroup.parent) { stairsGroup.parent.remove(stairsGroup); } } catch(e) {}
-        try { if (stairsRef && stairsRef.parent) { stairsRef.parent.remove(stairsRef); } } catch(e) {}
-  }
 
   // Create group to hold stairs
   stairsGroup = new THREE.Group();
@@ -766,7 +834,7 @@ async function placeTowerAndStairs() {
   interactivePlane.lookAt(init.cameraPos);
   // DO NOT make the interactive plane visible yet. It should only appear when
   // the puzzle module has finished preparing textures so the panel doesn't show
-  // empty/placeholder content. painting.init will set scene.userData.puzzleLoaded
+  // empty/placeholder content. slide_puzzle.init will set scene.userData.puzzleLoaded
   // and updateInteraction() will flip visibility when that flag appears.
       // scale plane based on initial distance so it appears consistent
       const d = init.cameraPos.distanceTo(interactivePlane.position);
@@ -808,18 +876,7 @@ function animate() {
   try { updateInteraction(); } catch (e) { /* ignore */ }
   // update slide puzzle if active
   try { if (SlidePuzzle && SlidePuzzle.update) SlidePuzzle.update(dt); } catch(e) {}
-    // If we're running the philosophy dev preview, update its layers/particles and render via composer
-    try {
-      if (DEV_START_PHILOSOPHY && devComposer) {
-        const t = devClock ? devClock.getElapsedTime() : 0;
-        if (devLayers && devLayers.length) devLayers.forEach((l)=>{ l.rotation.y += l.userData.speed; l.rotation.z = Math.sin(t * 0.05 + l.userData.offset) * 0.05; });
-        if (devStars) { devStars.rotation.y += 0.0002; }
-        try { if (devBloomPass) devBloomPass.strength = 1.1 + Math.sin(t * 0.5) * 0.2; } catch(e) {}
-        try { devComposer.render(); } catch(e) { renderer.render(scene, camera); }
-      } else {
-        renderer.render(scene, camera);
-      }
-    } catch(e) { renderer.render(scene, camera); }
+    renderer.render(scene, camera);
     // update stats overlay if present
     try {
       if (window._statsOverlay && window._statsOverlay.update) window._statsOverlay.update(dt);
@@ -832,7 +889,9 @@ function animate() {
 
 // --- Main Entry ---
 
-async function main() {
+function main() {
+  // Create initial intro overlay before anything else so the user sees the title/prompt
+  try { createIntroOverlay(); } catch(e) {}
   initScene();
   initControls();
   initLighting();
@@ -844,7 +903,7 @@ async function main() {
   async function _tryLoadHDRSky() {
     try {
       const rgbe = new RGBELoader();
-      const data = await new Promise((resolve, reject)=> rgbe.load('./assets/textures/Skybox.hdr', resolve, undefined, reject));
+      const data = await new Promise((resolve, reject)=> rgbe.load('./assets/skyboxes/Skybox.hdr', resolve, undefined, reject));
       // PMREM generator to get an env map suitable for PBR
       const pmrem = new THREE.PMREMGenerator(renderer);
       pmrem.compileEquirectangularShader();
