@@ -10,6 +10,7 @@ import { RGBELoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loaders
 import { PointerLockControls } from 'https://unpkg.com/three@0.164.1/examples/jsm/controls/PointerLockControls.js';
 import * as SlidePuzzle from './slide_puzzle.js';
 import { NarratorManager } from './narrator_manager.js';
+import { BackgroundMusic } from './audio_manager.js';
 
 // --- Scene Setup ---
 // Intro overlay: show title and start prompt, fade on first interaction
@@ -44,10 +45,83 @@ function createIntroOverlay() {
       }
       requestAnimationFrame(step);
     }
-    function onFirst(e) { try { dismiss(); } catch(e) {} }
+    function onFirst(e) { try { try { if (BackgroundMusic && typeof BackgroundMusic.init === 'function') BackgroundMusic.init(); if (BackgroundMusic && typeof BackgroundMusic.play === 'function') BackgroundMusic.play(); } catch(ex) { console.warn('BackgroundMusic play failed', ex); } dismiss(); } catch(e) {} }
     window.addEventListener('click', onFirst, { once: true });
     window.addEventListener('keydown', onFirst, { once: true });
   } catch(e) { console.warn('createIntroOverlay failed', e); }
+}
+
+// Small floating UI to toggle background music mute state
+function createMusicToggleUI() {
+  try {
+    // container to hold mute button + volume slider
+    const wrap = document.createElement('div');
+    wrap.id = 'lk_music_wrap';
+    wrap.style.position = 'fixed';
+    wrap.style.right = '12px';
+    wrap.style.bottom = '12px';
+    wrap.style.zIndex = 1000000;
+    wrap.style.display = 'flex';
+    wrap.style.alignItems = 'center';
+    wrap.style.gap = '8px';
+
+    const btn = document.createElement('button');
+    btn.id = 'lk_music_toggle';
+    btn.title = 'Alternar música de fondo';
+    btn.style.border = 'none';
+    btn.style.padding = '8px 10px';
+    btn.style.borderRadius = '8px';
+    btn.style.background = 'rgba(0,0,0,0.6)';
+    btn.style.color = '#fff';
+    btn.style.fontFamily = 'sans-serif';
+    btn.style.cursor = 'pointer';
+    btn.style.pointerEvents = 'auto';
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = '100';
+    slider.step = '1';
+    slider.title = 'Volumen música';
+    slider.style.width = '110px';
+    slider.style.appearance = 'none';
+    slider.style.cursor = 'pointer';
+
+    function updateUI() {
+      try {
+        const muted = BackgroundMusic && typeof BackgroundMusic.isMuted === 'function' ? BackgroundMusic.isMuted() : false;
+        btn.textContent = muted ? '🔇' : '🔊';
+        const vol = BackgroundMusic && typeof BackgroundMusic.getVolume === 'function' ? BackgroundMusic.getVolume() : 0.45;
+        slider.value = String(Math.round(vol * 100));
+      } catch(e) { btn.textContent = '♪'; slider.value = '45'; }
+    }
+
+    btn.addEventListener('click', (ev) => {
+      try {
+        if (BackgroundMusic && typeof BackgroundMusic.toggleMute === 'function') BackgroundMusic.toggleMute();
+        updateUI();
+      } catch(e) { console.warn('music toggle failed', e); }
+    });
+
+    slider.addEventListener('input', (ev) => {
+      try {
+        const v = Number(slider.value) / 100.0;
+        if (BackgroundMusic && typeof BackgroundMusic.setVolume === 'function') BackgroundMusic.setVolume(v);
+        // if user raises volume while muted, unmute
+        if (BackgroundMusic && typeof BackgroundMusic.isMuted === 'function' && BackgroundMusic.isMuted() && v > 0) {
+          if (BackgroundMusic.toggleMute) BackgroundMusic.toggleMute();
+        }
+        updateUI();
+      } catch(e) { console.warn('music volume change failed', e); }
+    });
+
+    wrap.appendChild(btn);
+    wrap.appendChild(slider);
+    document.body.appendChild(wrap);
+    // ensure BackgroundMusic initialized
+    try { if (BackgroundMusic && typeof BackgroundMusic.init === 'function') BackgroundMusic.init(); } catch(e) {}
+    updateUI();
+  } catch(e) { console.warn('createMusicToggleUI failed', e); }
 }
 
 let scene, camera, renderer, controls;
@@ -110,6 +184,7 @@ function initScene() {
   renderer.shadowMap.enabled = false;
   renderer.physicallyCorrectLights = false;
   renderer.setSize(window.innerWidth, window.innerHeight);
+  try { createMusicToggleUI(); } catch(e) {}
 }
 
 function initControls() {
@@ -119,7 +194,13 @@ function initControls() {
     try { if (scene && scene.userData && scene.userData.puzzleState === 'active') return; } catch(e) {}
     controls.lock();
   });
-  controls.addEventListener('lock',   () => console.log('Pointer locked'));
+  controls.addEventListener('lock',   () => {
+    try {
+      console.log('Pointer locked');
+      // Ensure background music plays when user locks pointer (another user interaction)
+      try { if (BackgroundMusic && typeof BackgroundMusic.play === 'function' && !(BackgroundMusic.isPlaying && BackgroundMusic.isPlaying())) BackgroundMusic.play(); } catch(e) { try { if (BackgroundMusic && typeof BackgroundMusic.play === 'function') BackgroundMusic.play(); } catch(ex) { console.warn('BackgroundMusic play on lock failed', ex); } }
+    } catch(e) { console.warn('lock handler failed', e); }
+  });
   controls.addEventListener('unlock', () => console.log('Pointer unlocked'));
   // Play narrator on first pointer lock (once per session)
   let _narratorPlayedOnLock = false;

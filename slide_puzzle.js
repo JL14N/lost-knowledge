@@ -1,5 +1,5 @@
 import * as THREE from 'https://unpkg.com/three@0.164.1/build/three.module.js';
-import { AudioManager } from './audio_manager.js';
+import { AudioManager, BackgroundMusic } from './audio_manager.js';
 
 /*
   Slide puzzle module (3x4)
@@ -373,6 +373,7 @@ export async function init(scene, camera, controls, anchorPosition, anchorQuater
   window._slidePuzzleState.inited = true;
   // mark puzzle as loaded so main can show F-dialog; use state machine key
   try { if (_scene && _scene.userData) _scene.userData.puzzleState = 'loaded'; } catch(e) {}
+  try { if (BackgroundMusic && typeof BackgroundMusic.playFor === 'function') BackgroundMusic.playFor('painting:play'); } catch(e) {}
   // play the scene-load-and-victory sound when the puzzle is loaded (per user request)
   try { AudioManager.play('painting:scene-victory'); } catch(e) {}
   console.log('SlidePuzzle: initialized (texturesLoaded=', window._slidePuzzleState.texturesLoaded, ')');
@@ -401,6 +402,7 @@ export function show() {
   if (!_scene || !_group) return;
   _active = true;
   try { if (_scene && _scene.userData) { _scene.userData.puzzleState = 'active'; } } catch(e) {}
+  try { if (BackgroundMusic && typeof BackgroundMusic.playFor === 'function') BackgroundMusic.playFor('painting:play'); } catch(e) {}
   // Do NOT unlock pointer or disable movement here; movement stays enabled until the user presses F.
   // make DOM overlay visible if desired
   // Bring puzzle group into scene and make visible
@@ -652,6 +654,7 @@ export function show() {
           if (_isSolved()) {
             console.log('SlidePuzzle: solved detected');
             try { AudioManager.play('painting:scene-victory'); } catch(e) {}
+            // background music remains as loop; no one-shot win track configured
             // fade in the missing final tile, then finish solved flow
             (async ()=>{
               try { _animating = true; await _fadeInBlank(600); } catch(e) { console.warn('SlidePuzzle: fade failed', e); }

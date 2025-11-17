@@ -75,3 +75,120 @@ export const AudioManager = {
   // Expose internal state for debugging
   _state() { return { active: Array.from(_activeKeys), loaded: Array.from(_audioEls.keys()) }; }
 };
+
+// Background music controller (separate from sound-effects and narrator managers)
+// Usage: call BackgroundMusic.init() early, then BackgroundMusic.play() after a user interaction
+// Place a music file at ./assets/audio/background.mp3 or call BackgroundMusic.load(src)
+export const BackgroundMusic = (function(){
+  const STORAGE_KEY_MUTED = 'lk_music_muted';
+  const STORAGE_KEY_VOLUME = 'lk_music_volume';
+  let _audio = null;
+  let _src = './assets/audio/background.mp3';
+  let _muted = false;
+  let _volume = 0.45;
+  let _currentKey = null;
+
+  // Default music map: map semantic keys to audio files (place files under these paths)
+  const MUSIC_MAP = {
+    // use the existing audio files in the repo (found under assets/audio/...)
+    'painting:play': './assets/audio/sound-effects/painting/painting_loop.mp3',
+    'philosophy:main': './assets/audio/sound-effects/philosophy/philosophy_loop.mp3'
+  };
+
+  function _createAudio() {
+    if (!_src) return null;
+    try {
+      const a = new Audio(_src);
+      a.loop = true;
+      a.preload = 'auto';
+      a.volume = _volume;
+      a.muted = _muted;
+      a.addEventListener('error', (e) => { console.warn('BackgroundMusic: audio element error', e); });
+      return a;
+    } catch (e) { console.warn('BackgroundMusic: create failed', e); return null; }
+  }
+
+  return {
+    init() {
+      try {
+        const m = window.localStorage && window.localStorage.getItem(STORAGE_KEY_MUTED);
+        if (m !== null) _muted = m === '1' || m === 'true';
+        const v = window.localStorage && window.localStorage.getItem(STORAGE_KEY_VOLUME);
+        if (v !== null) {
+          const nv = Number(v);
+          if (!Number.isNaN(nv)) _volume = Math.max(0, Math.min(1, nv));
+        }
+        if (!_audio) _audio = _createAudio();
+      } catch (e) { console.warn('BackgroundMusic.init failed', e); }
+    },
+
+    // Replace the audio source (call before play if needed)
+    load(src) {
+      try {
+        _src = src;
+        if (_audio) { try { _audio.pause(); _audio = null; } catch(e){} }
+        _audio = _createAudio();
+        // loading a custom src clears any current key mapping
+        _currentKey = null;
+      } catch (e) { console.warn('BackgroundMusic.load failed', e); }
+    },
+
+    // Play a semantic key from MUSIC_MAP. If the key is already playing, do nothing.
+    playFor(key) {
+      try {
+        if (!key) return false;
+        const src = MUSIC_MAP[key];
+        if (!src) { console.warn('BackgroundMusic.playFor: unknown key', key); return false; }
+        console.log('BackgroundMusic.playFor ->', key, src);
+        if (_currentKey === key && _audio && !_audio.paused && !_audio.ended) return true;
+        // switch src and play
+        this.load(src);
+        _currentKey = key;
+        return this.play();
+      } catch (e) { console.warn('BackgroundMusic.playFor failed', e); return false; }
+    },
+
+    getCurrentKey() { return _currentKey; },
+
+    play() {
+      try {
+        if (!_audio) _audio = _createAudio();
+        if (!_audio) return false;
+        const p = _audio.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {}).catch((err) => { console.warn('BackgroundMusic: play rejected', err); });
+        }
+        return true;
+      } catch (e) { console.warn('BackgroundMusic.play failed', e); return false; }
+    },
+
+    pause() {
+      try { if (_audio) _audio.pause(); } catch(e) { console.warn('BackgroundMusic.pause failed', e); }
+    },
+
+    stop() {
+      try { if (_audio) { _audio.pause(); _audio.currentTime = 0; } } catch(e) {}
+    },
+
+    setVolume(v) {
+      try { _volume = Math.max(0, Math.min(1, v)); if (_audio) _audio.volume = _volume; if (window.localStorage) window.localStorage.setItem(STORAGE_KEY_VOLUME, String(_volume)); } catch(e) { console.warn('BackgroundMusic.setVolume failed', e); }
+    },
+
+    getVolume() { return _volume; },
+
+    toggleMute() {
+      try {
+        _muted = !_muted;
+        if (_audio) _audio.muted = _muted;
+        if (window.localStorage) window.localStorage.setItem(STORAGE_KEY_MUTED, _muted ? '1' : '0');
+        return _muted;
+      } catch(e) { console.warn('BackgroundMusic.toggleMute failed', e); return _muted; }
+    },
+
+    isMuted() { return _muted; }
+    ,
+    isPlaying() {
+      try { return !!(_audio && !_audio.paused && !_audio.ended); } catch(e) { return false; }
+    }
+  };
+})();

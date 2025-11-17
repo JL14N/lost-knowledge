@@ -12,7 +12,7 @@ import { RenderPass } from 'https://unpkg.com/three@0.164.1/examples/jsm/postpro
 import { UnrealBloomPass } from 'https://unpkg.com/three@0.164.1/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { FilmPass } from 'https://unpkg.com/three@0.164.1/examples/jsm/postprocessing/FilmPass.js';
 import { ConstellationGame } from './constellation.js';
-import { AudioManager } from './audio_manager.js';
+import { AudioManager, BackgroundMusic } from './audio_manager.js';
 import { NarratorManager } from './narrator_manager.js';
 
 let scene, camera, renderer, clock;
@@ -191,6 +191,7 @@ function init() {
             const data = await fetch(entry.json).then(r=>r.json()).catch(()=>null);
             cg = new ConstellationGame(scene, camera, renderer, { radius: 900 });
             try { AudioManager.play('philosophy:on-level-start'); } catch(e) {}
+            try { if (BackgroundMusic && typeof BackgroundMusic.playFor === 'function') BackgroundMusic.playFor('philosophy:main'); } catch(e) {}
             if (data) {
               cg.sample = { image: entry.png, stars: data.stars || [], edges: data.edges || [], shooting: data.shooting || [] };
             } else {
